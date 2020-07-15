@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "EmailDeliveryService": {
+      "commandName": "Project",
+      "commandLineArgs": "-t:FirstTemplate -p"
+    }
+  }
+}
