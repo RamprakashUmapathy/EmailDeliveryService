@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Dynamic;
+using System.Numerics;
 using System.Text;
 
 namespace EmailDeliveryService.Model
@@ -10,7 +11,7 @@ namespace EmailDeliveryService.Model
         public MailData()
         {
         }
-
+        public long Id { get; set; }
         public string CardId { get; set; }
         public string EmailId { get; set; }
         public string EmailIdCC { get; set; }

@@ -1,0 +1,56 @@
+SELECT  p.CardId,
+		p.ShopId,
+		ShopName = n.Ragione_Sociale,
+		p.Name,
+		p.Surname,
+		p.Email,
+		BrandId = n.insegna,
+		p.LastPurchaseDate,
+		TotalPurchase,
+		DueAmount = ISNULL(DueAmount,0),
+		Discount = CASE 
+						WHEN (TotalPurchase >= 100 AND TotalPurchase < 250) AND (ISNULL(n.insegna,'') = 'KASANOVA' OR ISNULL(n.insegna,'') = 'KASANOVA+' OR ISNULL(n.insegna,'') = 'CO.IMPORT') THEN '10%' 
+						WHEN (TotalPurchase >= 250.00 AND TotalPurchase < 400.00) AND (ISNULL(n.insegna,'') = 'KASANOVA' OR ISNULL(n.insegna,'') = 'KASANOVA+' OR ISNULL(n.insegna,'') = 'CO.IMPORT') THEN '20%' 
+						WHEN (TotalPurchase >= 400.00) AND (ISNULL(n.insegna,'') = 'KASANOVA' OR ISNULL(n.insegna,'') = 'KASANOVA+' OR ISNULL(n.insegna,'') = 'CO.IMPORT') THEN '30%'
+
+						WHEN (TotalPurchase >= 100 AND TotalPurchase < 200) AND (ISNULL(n.insegna,'') = 'L''OUTLET DEL KASALIN') THEN '10%' 
+						WHEN (TotalPurchase >= 100 AND TotalPurchase < 300) AND (ISNULL(n.insegna,'') = 'L''OUTLET DEL KASALIN') THEN '20%' 
+						WHEN (TotalPurchase >= 300) AND (ISNULL(n.insegna,'') = 'L''OUTLET DEL KASALIN') THEN '30%' 
+
+					ELSE ''
+				END
+
+FROM (
+ SELECT TOP 1000 ShopId = ccf.Negozio,
+  CardId = TesseraCRM,
+  Name = a.Ragione_Sociale,
+  Surname = a.Ragione_Sociale1,
+  Email = a.Email,
+  TotalPurchase = CONVERT(money, SUM(Importo)),
+  LastPurchaseDate = MAX(DataDocumento)
+ FROM [Storico].[dbo].[conto_carta_fedelta] AS ccf
+	INNER JOIN [Sede].[dbo].[TessereCRM] AS t ON t.Tessera = ccf.TesseraCRM
+	INNER JOIN [Storico].[dbo].[anagrafiche] AS a ON ccf.TesseraCRM = a.Codice_Anagrafica
+ WHERE TesseraCRM LIKE 'KN02%' AND TipoDocumento = 'vendita' AND YEAR(DataDocumento) = @year
+				 AND ISNULL(StatoTessera, 0) = 1
+									AND ISNULL(A.Email, '') <> ''
+ GROUP BY ccf.Negozio,
+  ccf.TesseraCRM,
+  a.Ragione_Sociale,
+  a.Ragione_Sociale1,
+  a.Email
+  --n.insegna
+ 
+ ) AS P
+LEFT JOIN (
+ SELECT ShopId = Negozio,
+  CardId = TesseraCRM,
+  DueAmount = CONVERT(money, SUM(SaldoDelSaldo))
+ FROM [Storico].[dbo].[conto_aperto]
+ WHERE TesseraCRM LIKE 'KN02%' AND Saldato = 0
+ GROUP BY Negozio,
+  TesseraCRM
+ ) AS D ON p.ShopId = d.ShopId AND p.CardId = d.CardId
+INNER JOIN sede.dbo.Negozi AS n ON P.ShopId = n.Codice_Anagrafica
+ORDER BY p.CardId,
+		p.ShopId

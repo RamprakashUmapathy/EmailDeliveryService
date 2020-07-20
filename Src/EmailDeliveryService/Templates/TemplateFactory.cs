@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
 
-namespace EmailDeliveryService.Infrastructure
+namespace EmailDeliveryService.Templates
 {
     class TemplateFactory
     {
@@ -47,8 +47,7 @@ namespace EmailDeliveryService.Infrastructure
             foreach (Type type in typesInThisAssembly)
             {
                //if (type.GetInterface(typeof(ITemplate<>).ToString()) != null)
-               //if(type.BaseType != null && type.BaseType is BaseTemplate)
-                    trackTypes.Add(type.Name, type);
+                    trackTypes.Add(type.FullName, type);
             }
         }
 

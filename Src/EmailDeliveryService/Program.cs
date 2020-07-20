@@ -1,7 +1,16 @@
-﻿using EmailDeliveryService.Infrastructure;
+﻿using Amazon;
+using Amazon.Runtime;
+using Amazon.SimpleEmail;
+using Amazon.SimpleEmail.Model;
+using Dapper;
+using EmailDeliveryService.Extensions;
+using EmailDeliveryService.Infrastructure;
+using EmailDeliveryService.Infrastructure.Config;
 using EmailDeliveryService.Model;
+using EmailDeliveryService.Templates;
 using EmailDeliveryService.Utilty;
 using EmailDeliveryService.ViewModel;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -13,6 +22,7 @@ using System.Data;
 using System.Data.SqlClient;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using ILogger = Microsoft.Extensions.Logging.ILogger;
 
@@ -25,6 +35,7 @@ namespace EmailDeliveryService
         private static IConfiguration Configuration = null;
 
         private static ServiceProvider Provider = null;
+
         static async Task Main(string[] args)
         {
             int exitCode = 0;
@@ -58,7 +69,34 @@ namespace EmailDeliveryService
                 }
                 else if (cmdArgs.IsSendMail)
                 {
-                    await SendMail(cmdArgs.TemplateName);
+
+                    int pageSize = Configuration.GetValue<int>("PageSize", 2000);
+                    EmailSettings emailSettings = Configuration.GetSection("AmazonSimpleEmailService").Get<EmailSettings>();
+
+                    using (SqlConnection connection = new SqlConnection(Configuration.GetConnectionString("newsletters")))
+                    {
+                        connection.Open();
+                        var template = TemplateFactory.CreateInstance(cmdArgs.TemplateName);
+                        int i = 1;
+                        PaginationViewModel<MailData> pagedResults = null;
+                        do
+                        {
+                            //Get data for template 
+                            pagedResults = await template.GetDataAsync(connection, i, pageSize);
+                            if (!pagedResults.Data.Any())
+                            {
+                                string err = $"No data present in database to send mails for the template {cmdArgs.TemplateName}.";
+                                throw new ApplicationException(err);
+                            }
+                            //Send mail
+                            await SendMails(connection, emailSettings, cmdArgs.TemplateName, pagedResults.Data);
+                            Logger.LogInformation($"Processed page #{i} of {pagedResults.TotalPages}.");
+                            i++;
+                        }
+                        while (i <= pagedResults.TotalPages);
+                        if (connection.State == ConnectionState.Open) connection.Close();
+                    }
+                    //Logger.LogInformation($"End get data");
                 }
                 else if (cmdArgs.IsRetryFailedMessages)
                 {
@@ -97,24 +135,78 @@ namespace EmailDeliveryService
             }
         }
 
-        private static async Task SendMail(string templateName)
+
+        private static async Task SendMails(SqlConnection conn, EmailSettings settings, string templateName, IEnumerable<MailData> mailData)
         {
-            Logger.LogInformation($"Start get data");
-            using (SqlConnection connection = new SqlConnection(Configuration.GetConnectionString("newsletters")))
+            Stopwatch stopwatch = new Stopwatch();
+            stopwatch.Start();
+            Logger.LogInformation($"Start Sending mail");
+            var subsets = mailData.Partition(settings.EmailMaxSendRate);
+
+            foreach (var subset in subsets)
             {
-                connection.Open();
-                var template = TemplateFactory.CreateInstance(templateName);
-                int i = 1;
-                PaginationViewModel<MailData> pagedResults = null;
-                do
+                List<Task<EmailResponse>> tasks = new List<Task<EmailResponse>>();
+
+                foreach (var mail in subset)
                 {
-                    pagedResults = await template.GetDataAsync(connection, i, 2000);
-                    i++;
+                    var tsk = SendMailAsync(settings, templateName, settings.SourceMail, mail);
+                    tasks.Add(tsk);
                 }
-                while (i <= pagedResults.TotalPages);
-                if (connection.State == ConnectionState.Open) connection.Close();
+                Task t = Task.WhenAll(tasks.ToArray());
+                try
+                {
+                    await t;
+                }
+                catch { }
+                tasks.ForEach(f =>
+               {
+                   long mailId = f.Result.MailId;
+                   string exception = null;
+                   string mailStatus = "";
+                   string mailResponseId = null;
+
+                   if (f.IsCompletedSuccessfully)
+                   {
+                       mailStatus = MailStatus.Sent;
+                       mailResponseId = f.Result.MessageId;
+                   }
+                   else if (f.IsFaulted)
+                   {
+                       mailStatus = MailStatus.Error;
+                       foreach (Exception ex in f.Exception.Flatten().InnerExceptions)
+                       {
+                           exception += ex.ToString() + Environment.NewLine;
+                       }
+                   }
+                   var parameters = new { mailid = mailId, exception, mailStatus, mailResponseId };
+                   conn.Execute("nl.MailsUpdate", param: parameters, commandTimeout: 0, commandType: CommandType.StoredProcedure);
+               });
+
             }
-            Logger.LogInformation($"End get data");
+            stopwatch.Stop();
+            Logger.LogInformation($"End Sending mail in {stopwatch.Elapsed.TotalSeconds} seconds.");
+        }
+
+        public static async Task<EmailResponse> SendMailAsync(EmailSettings settings, string templateName, string sourceMail, MailData mailData)
+        {
+            using (var emailClient = new AmazonSimpleEmailServiceClient(
+                            new BasicAWSCredentials(settings.AccessKey, settings.SecretKey),
+                            RegionEndpoint.EUCentral1))
+            {
+                var sendRequest = new SendTemplatedEmailRequest
+                {
+                    Source = sourceMail,
+                    Destination = new Destination { ToAddresses = new List<string> { mailData.EmailId } },
+                    Template = templateName,
+                    TemplateData = mailData.BodyParametersData
+                };
+                SendTemplatedEmailResponse result = await emailClient.SendTemplatedEmailAsync(sendRequest);
+                await Task.Delay(TimeSpan.FromSeconds(1));
+                return new EmailResponse() { MailId = mailData.Id, HttpStatus = result.HttpStatusCode, MessageId = result.MessageId };
+            }
+            //await Task.Delay(50);
+            //throw new ApplicationException();
+            //return new EmailResponse() { MailId = mailData.Id, HttpStatus = System.Net.HttpStatusCode.OK, MessageId = new Guid().ToString() };
         }
 
         private static async Task LoadData(string templateName)
@@ -146,7 +238,6 @@ namespace EmailDeliveryService
                .Build();
 
             var services = new ServiceCollection();
-
             //Logging
             services.AddLogging();
             var provider = services.BuildServiceProvider();
@@ -154,6 +245,10 @@ namespace EmailDeliveryService
             factory.AddNLog();
             Logger = provider.GetService<ILogger<Program>>();
             LogManager.Configuration = new NLogLoggingConfiguration(Configuration.GetSection("NLog"));
+
+            //EFCore
+            services.AddDbContext<NewsLettersContext>(options =>
+                options.UseSqlServer(Configuration.GetConnectionString("newsletters")));
 
             Provider = provider;
         }

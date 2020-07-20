@@ -1,39 +1,22 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Text;
 
 namespace EmailDeliveryService.Model
 {
-    /// <summary>
-    /// Defines a mail template
-    /// </summary>
-    public class Template
+    public partial class Template
     {
-        /// <summary>
-        /// Defines an unique identifier
-        /// </summary>
-        public Guid Id { get; private set; }
+        public Template()
+        {
+            MailArchives = new HashSet<MailArchive>();
+            Mails = new HashSet<Mail>();
+        }
 
-        /// <summary>
-        /// Name of the template
-        /// </summary>
-        public string Name { get; private set; }
-        /// <summary>
-        /// Body of the template
-        /// </summary>
-        public string Body { get; private set; }
-        /// <summary>
-        /// Parameter template in json format
-        /// </summary>
-        public string BodyParameters { get; private set; }
-        /// <summary>
-        /// Amazon Web Service SES template name
-        /// </summary>
-        public string AWSTemplateName { get; private set; }
-        /// <summary>
-        /// is defined in Amazon Web Service SES 
-        /// </summary>
-        public bool IsDefinedInAWS { get; private set; }
-
+        public Guid Id { get; set; }
+        public string Name { get; set; }
+        public string Body { get; set; }
+        public string BodyParameters { get; set; }
+        public string Awssesname { get; set; }
+        public virtual ICollection<MailArchive> MailArchives { get; set; }
+        public virtual ICollection<Mail> Mails { get; set; }
     }
 }

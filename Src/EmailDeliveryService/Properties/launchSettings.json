@@ -2,7 +2,7 @@
   "profiles": {
     "EmailDeliveryService": {
       "commandName": "Project",
-      "commandLineArgs": "-t:FirstTemplate -p"
+      "commandLineArgs": "-t:ContoApertoTemplate -p"
     }
   }
 }
