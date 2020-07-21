@@ -6,6 +6,10 @@ using System.Text;
 
 namespace EmailDeliveryService.Templates
 {
+    /// <summary>
+    /// Abstract factory pattern
+    /// https://en.wikipedia.org/wiki/Abstract_factory_pattern
+    /// </summary>
     class TemplateFactory
     {
         static Dictionary<string, Type> trackTypes;
@@ -14,7 +18,7 @@ namespace EmailDeliveryService.Templates
             LoadTypesICanReturn();
         }
 
-        public static ITemplate<MailData> CreateInstance(string templateName)
+        public static ITemplate<Mail> CreateInstance(string templateName)
         {
             LoadTypesICanReturn();
             Type t = GetTypeToCreate(templateName);
@@ -23,7 +27,7 @@ namespace EmailDeliveryService.Templates
             {
                 throw new NotSupportedException();
             }
-            return Activator.CreateInstance(t) as ITemplate<MailData>;
+            return Activator.CreateInstance(t) as ITemplate<Mail>;
         }
 
         private static Type GetTypeToCreate(string typeName)

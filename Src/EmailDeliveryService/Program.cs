@@ -2,7 +2,6 @@
 using Amazon.Runtime;
 using Amazon.SimpleEmail;
 using Amazon.SimpleEmail.Model;
-using Dapper;
 using EmailDeliveryService.Extensions;
 using EmailDeliveryService.Infrastructure;
 using EmailDeliveryService.Infrastructure.Config;
@@ -77,23 +76,20 @@ namespace EmailDeliveryService
                     {
                         connection.Open();
                         var template = TemplateFactory.CreateInstance(cmdArgs.TemplateName);
-                        int i = 1;
-                        PaginationViewModel<MailData> pagedResults = null;
-                        do
-                        {
-                            //Get data for template 
-                            pagedResults = await template.GetDataAsync(connection, i, pageSize);
-                            if (!pagedResults.Data.Any())
+                        int pageIdx = 0;
+                        PaginationViewModel<Mail> pagedResults = await template.GetDataAsync(connection, 0, pageSize); 
+                        while (pagedResults.TotalPages > 0) 
+                        {            
+                            if (pagedResults.Data.Any())
                             {
-                                string err = $"No data present in database to send mails for the template {cmdArgs.TemplateName}.";
-                                throw new ApplicationException(err);
+                                await SendMails(connection, emailSettings, cmdArgs.TemplateName, pagedResults.Data);
+                                Logger.LogInformation($"Processed page #{pageIdx + 1}");
                             }
+                            pageIdx++;
+                            pagedResults = await template.GetDataAsync(connection, 0, pageSize);
                             //Send mail
-                            await SendMails(connection, emailSettings, cmdArgs.TemplateName, pagedResults.Data);
-                            Logger.LogInformation($"Processed page #{i} of {pagedResults.TotalPages}.");
-                            i++;
+
                         }
-                        while (i <= pagedResults.TotalPages);
                         if (connection.State == ConnectionState.Open) connection.Close();
                     }
                     //Logger.LogInformation($"End get data");
@@ -135,13 +131,12 @@ namespace EmailDeliveryService
             }
         }
 
-
-        private static async Task SendMails(SqlConnection conn, EmailSettings settings, string templateName, IEnumerable<MailData> mailData)
+        private static async Task SendMails(SqlConnection conn, EmailSettings settings, string templateName, IEnumerable<Mail> mailData)
         {
             Stopwatch stopwatch = new Stopwatch();
             stopwatch.Start();
-            Logger.LogInformation($"Start Sending mail");
-            var subsets = mailData.Partition(settings.EmailMaxSendRate);
+            //Logger.LogInformation($"Start Sending mail");
+            var subsets = mailData.Partition(settings.EmailMaxSendRateSecond);
 
             foreach (var subset in subsets)
             {
@@ -159,35 +154,53 @@ namespace EmailDeliveryService
                 }
                 catch { }
                 tasks.ForEach(f =>
-               {
-                   long mailId = f.Result.MailId;
-                   string exception = null;
-                   string mailStatus = "";
-                   string mailResponseId = null;
+                {
+                    long mailId = f.Result.MailId;
+                    string exception = null;
+                    string mailStatus = "";
+                    string mailResponseId = null;
 
-                   if (f.IsCompletedSuccessfully)
-                   {
-                       mailStatus = MailStatus.Sent;
-                       mailResponseId = f.Result.MessageId;
-                   }
-                   else if (f.IsFaulted)
-                   {
-                       mailStatus = MailStatus.Error;
-                       foreach (Exception ex in f.Exception.Flatten().InnerExceptions)
-                       {
-                           exception += ex.ToString() + Environment.NewLine;
-                       }
-                   }
-                   var parameters = new { mailid = mailId, exception, mailStatus, mailResponseId };
-                   conn.Execute("nl.MailsUpdate", param: parameters, commandTimeout: 0, commandType: CommandType.StoredProcedure);
-               });
+                    if (f.IsCompletedSuccessfully)
+                    {
+                        mailStatus = MailStatus.Sent;
+                        mailResponseId = f.Result.MessageId;
+                    }
+                    else if (f.IsFaulted)
+                    {
+                        mailStatus = MailStatus.Error;
+                        foreach (Exception ex in f.Exception.Flatten().InnerExceptions)
+                        {
+                            exception += ex.ToString() + Environment.NewLine;
+                        }
+                    }
+
+                    var optionsBuilder = new DbContextOptionsBuilder<NewsLettersContext>();
+                    optionsBuilder.UseSqlServer(conn.ConnectionString);
+                    using (NewsLettersContext context = new NewsLettersContext(optionsBuilder.Options))
+                    {
+                        var mail = context.Mails.Single(f => f.Id == mailId);
+                        mail.MailStatus = MailStatus.Sent;
+
+                        var lineNumber = context.MailStatus
+                                                 .Where(f => f.MailId == mailId)
+                                                 .DefaultIfEmpty()
+                                                 .Max(p => p == null ? byte.MinValue : p.LineNumber);
+                        lineNumber++;
+                        mail.MailStatusNavigation.Add(new MailStatus() { LineNumber = lineNumber, Date = DateTime.Now, MailStatus1 = mailStatus, Exception = exception, MailResponseId = mailResponseId });
+
+                        //TODO
+                        //context.MailArchives.Add(new MailArchive() {BodyParametersData = f. })
+
+                        context.SaveChanges();
+                    }
+                });
 
             }
             stopwatch.Stop();
-            Logger.LogInformation($"End Sending mail in {stopwatch.Elapsed.TotalSeconds} seconds.");
+            //Logger.LogInformation($"End Sending mail in {stopwatch.Elapsed.TotalSeconds} seconds.");
         }
 
-        public static async Task<EmailResponse> SendMailAsync(EmailSettings settings, string templateName, string sourceMail, MailData mailData)
+        public static async Task<EmailResponse> SendMailAsync(EmailSettings settings, string templateName, string sourceMail, Mail mailData)
         {
             using (var emailClient = new AmazonSimpleEmailServiceClient(
                             new BasicAWSCredentials(settings.AccessKey, settings.SecretKey),
@@ -196,7 +209,12 @@ namespace EmailDeliveryService
                 var sendRequest = new SendTemplatedEmailRequest
                 {
                     Source = sourceMail,
-                    Destination = new Destination { ToAddresses = new List<string> { mailData.EmailId } },
+                    Destination = new Destination
+                    {
+                        ToAddresses = new List<string> { "umapathy.ramprakash@kasanova.it"
+                        //mailData.EmailId 
+                    }
+                    },
                     Template = templateName,
                     TemplateData = mailData.BodyParametersData
                 };
@@ -204,8 +222,8 @@ namespace EmailDeliveryService
                 await Task.Delay(TimeSpan.FromSeconds(1));
                 return new EmailResponse() { MailId = mailData.Id, HttpStatus = result.HttpStatusCode, MessageId = result.MessageId };
             }
-            //await Task.Delay(50);
-            //throw new ApplicationException();
+            
+            ////throw new ApplicationException();
             //return new EmailResponse() { MailId = mailData.Id, HttpStatus = System.Net.HttpStatusCode.OK, MessageId = new Guid().ToString() };
         }
 

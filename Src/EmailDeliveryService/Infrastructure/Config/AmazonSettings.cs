@@ -24,6 +24,6 @@ namespace EmailDeliveryService.Infrastructure.Config
         /// <summary>
         /// Maximum number concurrent requests made in Amazon site for optimization
         /// </summary>
-        public int EmailMaxSendRate { get;  set; }
+        public int EmailMaxSendRateSecond { get;  set; }
     }
 }

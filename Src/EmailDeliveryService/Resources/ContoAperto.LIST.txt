@@ -21,7 +21,7 @@ SELECT  p.CardId,
 				END
 
 FROM (
- SELECT TOP 1000 ShopId = ccf.Negozio,
+ SELECT TOP 200 ShopId = ccf.Negozio,
   CardId = TesseraCRM,
   Name = a.Ragione_Sociale,
   Surname = a.Ragione_Sociale1,
@@ -39,7 +39,7 @@ FROM (
   a.Ragione_Sociale,
   a.Ragione_Sociale1,
   a.Email
-  --n.insegna
+
  
  ) AS P
 LEFT JOIN (

@@ -26,9 +26,31 @@ namespace EmailDeliveryService.Templates
 
         public override string TemplateName => this.GetType().Name;
 
-        public override Task<PaginationViewModel<MailData>> GetDataAsync(IDbConnection connection, int pageNumber, int pageSize)
+        public override async Task<PaginationViewModel<Mail>> GetDataAsync(IDbConnection connection, int pageNumber, int pageSize)
         {
-            throw new NotImplementedException();
+            if (connection is SqlConnection == false) throw new Exception("The connection string NewsLetters should be of type SqlConnection");
+            var destination = (SqlConnection)connection;
+
+            var optionsBuilder = new DbContextOptionsBuilder<NewsLettersContext>();
+            optionsBuilder.UseSqlServer(destination.ConnectionString);
+
+            using (NewsLettersContext context = new NewsLettersContext(optionsBuilder.Options))
+            {
+                Template template = context.Templates.Single(s => s.Name == TemplateName);
+
+                var recordCount = await context.Mails
+                                    .Where(m => m.TemplateId == template.Id && m.MailStatus == MailStatus.Prepared)
+                                    .CountAsync();
+
+                var pageData = await context.Mails
+                                    .Where(m => m.TemplateId == template.Id && m.MailStatus == MailStatus.Prepared)
+                                    .OrderBy(o => o.Id)
+                                    .Skip(pageSize * pageNumber)
+                                    .Take(pageSize)
+                                    .ToListAsync();
+
+                return base.PaginationViewModel<Mail>(pageSize, pageNumber, recordCount, pageData);
+            }
         }
 
         public override async Task LoadDataAsync(Dictionary<string, IDbConnection> connenctionManagers)
@@ -38,19 +60,33 @@ namespace EmailDeliveryService.Templates
 
             if (sourceConnection is SqlConnection == false) throw new Exception("The connection string Sede should be of type SqlConnection");
             if (destinationConnection is SqlConnection == false) throw new Exception("The connection string NewsLetters should be of type SqlConnection");
+
             var source = (SqlConnection)sourceConnection;
             var destination = (SqlConnection)destinationConnection;
 
             await BulkCopy(source, destination);
 
             await PrepareMailDataAsync(destination.ConnectionString);
-
         }
 
         private async Task BulkCopy(SqlConnection source, SqlConnection destination)
         {
             try
             {
+                //EFcore
+                var optionsBuilder = new DbContextOptionsBuilder<NewsLettersContext>();
+                optionsBuilder.UseSqlServer(destination.ConnectionString);
+
+                using (NewsLettersContext context = new NewsLettersContext(optionsBuilder.Options))
+                {
+                    Template template = context.Templates.Single(s => s.Name == TemplateName);
+
+                    if (context.Mails.Any(m => m.TemplateId == template.Id && m.MailStatus == MailStatus.Prepared))
+                    {
+                        throw new ApplicationException($"Unable to proceed as there are some previous mails are in not sent condition for the template {template.Name}");
+                    }
+                }
+
                 //Delete
                 using SqlCommand tCmd = new SqlCommand("DELETE FROM [nl].[ContoApertoTemplateData]", destination);
                 tCmd.CommandTimeout = 0;
@@ -58,7 +94,8 @@ namespace EmailDeliveryService.Templates
 
                 using SqlCommand cmd = new SqlCommand(Resources.ContoApertoTemplateLIST, source)
                 {
-                    CommandType = CommandType.Text
+                    CommandType = CommandType.Text,
+                    CommandTimeout = 0
                 };
                 cmd.Parameters.AddWithValue("@year", DateTime.Now.Date.Year);
                 using SqlDataReader reader = await cmd.ExecuteReaderAsync();
@@ -77,7 +114,7 @@ namespace EmailDeliveryService.Templates
                     bulkcopy.ColumnMappings.Add("DueAmount", "DueAmount");
                     bulkcopy.ColumnMappings.Add("Discount", "Discount");
                     bulkcopy.DestinationTableName = "[nl].[ContoApertoTemplateData]";
-                    await bulkcopy.WriteToServerAsync(reader);
+                    bulkcopy.WriteToServer(reader);
                     bulkcopy.Close();
                 }
             }
@@ -90,92 +127,104 @@ namespace EmailDeliveryService.Templates
 
         private async Task PrepareMailDataAsync(string destinationConnectionString)
         {
-
-
             //EFcore
             var optionsBuilder = new DbContextOptionsBuilder<NewsLettersContext>();
             optionsBuilder.UseSqlServer(destinationConnectionString);
 
-
             //using (var scope = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
             //{
-                using (NewsLettersContext context = new NewsLettersContext(optionsBuilder.Options))
+            using (NewsLettersContext context = new NewsLettersContext(optionsBuilder.Options))
+            {
+                Template template = context.Templates.Single(s => s.Name == TemplateName);
+
+                //Too slow removing by key
+                //var deletedMails = context.Mails.Where(m => m.TemplateId == template.Id);
+                //context.Mails.RemoveRange(deletedMails);
+
+                var commandText = "DELETE FROM nl.Mails WHERE templateid = @templateid";
+                var name = new Microsoft.Data.SqlClient.SqlParameter("@templateid", template.Id);
+
+                await context.Database.ExecuteSqlRawAsync(commandText, name);
+
+                //Paginate
+                var culture = new CultureInfo("it-IT");
+                TextInfo textInfo = culture.TextInfo;
+                var page = 0;
+                var pageSize = 20000;
+                var recordCount = context.ContoApertoTemplateData.Count();
+                var pageCount = (int)((recordCount + pageSize) / pageSize);
+
+                if (recordCount < 1)
                 {
-                    Template template = context.Templates.Single(s => s.Name == TemplateName);
+                    return;
+                }
 
-                    //Too slow removing by key
-                    //var deletedMails = context.Mails.Where(m => m.TemplateId == template.Id);
-                    //context.Mails.RemoveRange(deletedMails);
+                while (page < pageCount)
+                {
+                    var pageData = context.ContoApertoTemplateData
+                                            .OrderBy(o => o.CardId)
+                                            .ThenBy(o => o.ShopId)
+                                            .Skip(pageSize * page).Take(pageSize).ToList();
+                    var userItems = pageData
+                                       .GroupBy(
+                                          ca =>
+                                             new
+                                             {
+                                                 CardId = ca.CardId,
+                                                 Name = ca.Name,
+                                                 Surname = ca.Surname,
+                                                 Email = ca.Email
+                                             }
+                                       )
+                                       .Select(
+                                          g =>
+                                             new BodyParameterData
+                                             {
+                                                 CardId = g.Key.CardId,
+                                                 Name = textInfo.ToTitleCase(g.Key.Name.ToLower()),
+                                                 Email = g.Key.Email,
+                                                 TotalPurchase = g.Sum(g1 => g1.TotalPurchase).ToString("C2", culture),
+                                                 Due = g.Sum(g1 => g1.DueAmount).ToString("C2", culture),
+                                                 LastUpdatedDateTime = DateTime.Now.ToString("dd/MM/yyyy hh:mm"),
+                                                 Purchases = g.GroupBy(g1 => g1.ShopName)
+                                                   .Select(
+                                                      g1 =>
+                                                         new Purchase
+                                                         {
+                                                             ShopName = g1.Key,
+                                                             LastPurchaseDate = g1.Max(g1 => g1.LastPurchaseDate).ToString("dd/MM/yyyy"),
+                                                             TotalPurchase = g1.Sum(g1 => g1.TotalPurchase).ToString("C2", culture),
+                                                             Due = g1.Sum(g1 => g1.DueAmount).ToString("C2", culture),
+                                                             Discount = g1.Max(g1 => g1.Discount),
+                                                             IsDiscountEligible = !string.IsNullOrEmpty(g1.Max(g1 => g1.Discount))
+                                                         }
+                                                   ).ToList()
+                                             }
+                                       ).ToList();
 
-                    var commandText = "DELETE FROM nl.Mails WHERE templateid = @templateid";
-                    var name = new Microsoft.Data.SqlClient.SqlParameter("@templateid", template.Id);
-
-                    await context.Database.ExecuteSqlRawAsync(commandText, name);
-
-                    //Process Shop by shop with in memory options (otherwise takes too much time)
-                    var shops = context.ContoApertoTemplateData.Select(c => c.ShopId).Distinct().ToList();
-                    TextInfo textInfo = Thread.CurrentThread.CurrentCulture.TextInfo;
-                    foreach (string shopId in shops)
+                    List<Mail> mails = new List<Mail>();
+                    userItems.ForEach(i =>
                     {
-                        var shopItems = await context.ContoApertoTemplateData
-                                            .Where(f => f.ShopId == shopId)
-                                            .ToListAsync();
-
-                        var userItems = shopItems
-                                           .GroupBy(
-                                              ca =>
-                                                 new
-                                                 {
-                                                     CardId = ca.CardId,
-                                                     Name = ca.Name,
-                                                     Surname = ca.Surname,
-                                                     Email = ca.Email
-                                                 }
-                                           )
-                                           .Select(
-                                              g =>
-                                                 new BodyParameterData
-                                                 {
-                                                     CardId = g.Key.CardId,
-                                                     Name = textInfo.ToTitleCase(g.Key.Name.ToLower()),
-                                                     Email = g.Key.Email,
-                                                     TotalPurchase = g.Sum(g1 => g1.TotalPurchase),
-                                                     Due = g.Sum(g1 => g1.DueAmount),
-                                                     Purchases = g.GroupBy(g1 => g1.ShopName)
-                                                       .Select(
-                                                          g1 =>
-                                                             new Purchase
-                                                             {
-                                                                 ShopName = g1.Key,
-                                                                 TotalPurchase = g1.Sum(g1 => g1.TotalPurchase),
-                                                                 Due = g1.Sum(g1 => g1.DueAmount),
-                                                                 Discount = g1.Max(g1 => g1.Discount)
-                                                             }
-                                                       ).ToList()
-                                                 }
-                                           ).ToList();
-
-                        List<Mail> mails = new List<Mail>();
-                        userItems.ForEach(i =>
+                        string data = JsonSerializer.Serialize<BodyParameterData>(i);
+                        var mail = new Mail()
                         {
-                            string data = JsonSerializer.Serialize<BodyParameterData>(i);
-                            mails.Add(new Mail()
-                            {
-                                BodyParametersData = data,
-                                CardId = i.CardId,
-                                Date = DateTime.Now,
-                                EmailId = i.Email,
-                                EmailIdBcc = null,
-                                EmailIdCc = null,
-                                MailStatus = MailStatus.Prepared,
-                                TemplateId = template.Id,
-                            //MailStatusNavigation = new MailStatus() { Date = DateTime.Now}
-                        });
-                        });
-                        context.Mails.AddRange(mails);
-                        context.SaveChanges();
+                            BodyParametersData = data,
+                            CardId = i.CardId,
+                            Date = DateTime.Now,
+                            EmailId = i.Email,
+                            EmailIdBcc = null,
+                            EmailIdCc = null,
+                            MailStatus = MailStatus.Prepared,
+                            TemplateId = template.Id
+                        };
+                        mail.MailStatusNavigation.Add(new MailStatus() { Date = DateTime.Now, MailStatus1 = MailStatus.Prepared, LineNumber = 1 });
 
-                    }
+                        mails.Add(mail);
+                    });
+                    context.Mails.AddRange(mails);
+                    context.SaveChanges();
+                    page++;
+                }
                 //    scope.Complete();
                 //}
             }
@@ -198,9 +247,11 @@ namespace EmailDeliveryService.Templates
         [JsonPropertyName("purchases")]
         public List<Purchase> Purchases { get; set; }
         [JsonPropertyName("totalPurchase")]
-        public decimal TotalPurchase { get; set; }
+        public string TotalPurchase { get; set; }
         [JsonPropertyName("dueAmount")]
-        public decimal Due { get; set; }
+        public string Due { get; set; }
+        [JsonPropertyName("lastUpdatedDateTime")]
+        public string LastUpdatedDateTime { get; set; }
 
     }
 
@@ -209,11 +260,15 @@ namespace EmailDeliveryService.Templates
         [JsonPropertyName("shopName")]
         public string ShopName { get; set; }
         [JsonPropertyName("lastPurchaseDate")]
-        public decimal TotalPurchase { get; set; }
+        public string LastPurchaseDate { get; set; }
+        [JsonPropertyName("totalPurchase")]
+        public string TotalPurchase { get; set; }
         [JsonPropertyName("dueAmount")]
-        public decimal Due { get; set; }
+        public string Due { get; set; }
         [JsonPropertyName("extraDiscount")]
         public string Discount { get; set; }
+        [JsonPropertyName("isDiscountEligible")]
+        public bool IsDiscountEligible { get; set; }
 
     }
 }
